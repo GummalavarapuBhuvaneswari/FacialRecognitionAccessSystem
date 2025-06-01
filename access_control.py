@@ -6,94 +6,104 @@ import datetime
 import os
 import subprocess
 
-# File locations – just keeping things centralized up here
+# --- Config / paths (moved to the top just so I don’t forget where they are)
 USERS_FILE = "authorized_users.csv"
 LOGS_FILE = "access_logs.csv"
 REG_SCRIPT = "add_user.py"
 
-# First thing: make sure we actually have registered users to compare with
+# Quick sanity check — do we even have a list of users yet?
 if not os.path.exists(USERS_FILE):
-    print("[ERROR] Couldn't find the authorized users file. Try running add_user.py first.")
+    print("[ERROR] User file missing. Run registration first maybe?")
     exit(1)
 
-# Load known face encodings from CSV
-user_df = pd.read_csv(USERS_FILE)
+# Reading in the user data. This assumes there's a 'Name' and some encoded vectors
+try:
+    df_users = pd.read_csv(USERS_FILE)
+except Exception as e:
+    print("[ERROR] Couldn't read user file:", e)
+    exit(1)
 
-# These will be used later to compare faces
-names_known = user_df["Name"].tolist()
-face_data = user_df.drop(columns=["Name", "Timestamp"]).values.astype(float)
+# Grab names and encoding data (excluding timestamp for now — maybe useful later?)
+all_names = df_users["Name"].tolist()
+known_encodings = df_users.drop(columns=["Name", "Timestamp"]).values.astype(float)
 
-# Make sure we’ve got a place to log entry attempts
+# If logs file doesn’t exist, create an empty one (kinda essential to track who came in)
 if not os.path.isfile(LOGS_FILE):
-    logs_df = pd.DataFrame(columns=["Name", "Date-Time", "Status"])
-    logs_df.to_csv(LOGS_FILE, index=False)
+    pd.DataFrame(columns=["Name", "Date-Time", "Status"]).to_csv(LOGS_FILE, index=False)
 
-# Open up webcam feed
+# Fire up the webcam — should probably add a fallback for external cams later
 cam = cv2.VideoCapture(0)
-print("[INFO] Facial recognition is running. Press 'A' to add user or 'Q' to quit.")
+print("[INFO] System armed. Press 'A' to register new face | Press 'Q' to quit.")
 
+# main loop
 while True:
-    ok, frame = cam.read()
-    if not ok:
-        print("[ERROR] Couldn't read from the webcam.")
+    grabbed, frame = cam.read()
+    if not grabbed:
+        print("Webcam glitch — skipping frame.")
         continue
 
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    # Converting from BGR to RGB (face_recognition prefers it that way)
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-    # Try to find faces in current frame
-    found_faces = face_recognition.face_locations(rgb)
-    encodings = face_recognition.face_encodings(rgb, found_faces)
+    # Detecting faces and getting encodings for them
+    face_positions = face_recognition.face_locations(rgb_frame)
+    frame_encodings = face_recognition.face_encodings(rgb_frame, face_positions)
 
-    for (top, right, bottom, left), this_encoding in zip(found_faces, encodings):
-        match_name = "Unknown"
-        access_status = "Access Denied"
-        box_color = (0, 0, 255)  # Red by default
+    for (top, right, bottom, left), encoding in zip(face_positions, frame_encodings):
+        label = "Unknown"
+        status = "Access Denied"
+        color = (0, 0, 255)  # default: red box
 
-        # Figure out the closest face from known list
-        distances = face_recognition.face_distance(face_data, this_encoding)
-        best_idx = np.argmin(distances)
+        # measure similarity against stored encodings
+        distances = face_recognition.face_distance(known_encodings, encoding)
+        closest_index = np.argmin(distances) if len(distances) > 0 else -1
 
-        # Check if the best match is close enough – kinda arbitrary but tuned a bit
-        if distances[best_idx] < 0.45:
-            match_name = names_known[best_idx]
-            access_status = "Access Granted"
-            box_color = (0, 255, 0)  # Green if it's a match
+        # Just a rough cutoff; might tweak this based on results
+        if closest_index >= 0 and distances[closest_index] < 0.45:
+            label = all_names[closest_index]
+            status = "Access Granted"
+            color = (0, 255, 0)  # yay, green box
 
-        # Draw a box around the face and label it
-        cv2.rectangle(frame, (left, top), (right, bottom), box_color, 2)
-        cv2.putText(frame, f"{match_name} - {access_status}", 
-                    (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, box_color, 2)
+        # Draw box and text on screen
+        cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+        cv2.putText(frame, f"{label} - {status}", (left, top - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-        # Show access result in the center too
-        cv2.putText(frame, f"{access_status}: {match_name}", 
-                    (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, box_color, 3)
+        # Optional: flash status at the top for better visibility
+        cv2.putText(frame, f"{status}: {label}", (50, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.1, color, 3)
 
-        # Record the attempt in logs
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        old_logs = pd.read_csv(LOGS_FILE)
-        new_row = [match_name, now_str, access_status]
-        old_logs.loc[len(old_logs)] = new_row
-        old_logs.to_csv(LOGS_FILE, index=False)
+        # Logging time & decision
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            logs = pd.read_csv(LOGS_FILE)
+        except:
+            logs = pd.DataFrame(columns=["Name", "Date-Time", "Status"])
 
-    # Add bottom message to guide user
-    cv2.putText(frame, "Press 'A' to Register | Press 'Q' to Quit", 
-                (15, frame.shape[0] - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        new_log = pd.DataFrame([[label, timestamp, status]], columns=logs.columns)
+        logs = pd.concat([logs, new_log], ignore_index=True)
+        logs.to_csv(LOGS_FILE, index=False)
 
-    # Show the camera feed with overlays
+    # footer instructions
+    footer_text = "Press 'A' to Register | Press 'Q' to Quit"
+    cv2.putText(frame, footer_text, (20, frame.shape[0] - 15),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+    # Display updated frame
     cv2.imshow("Access Control", frame)
 
     key = cv2.waitKey(1)
 
     if key == ord('q'):
-        print("[INFO] Exiting the system.")
+        print("[INFO] Shutting down system.")
         break
     elif key == ord('a'):
-        print("[INFO] Launching user registration script...")
+        print("[INFO] Registering a new user (launching external script).")
         cam.release()
         cv2.destroyAllWindows()
         subprocess.run(["python", REG_SCRIPT])
         break
 
-# Wrap it up
+# cleanup — never forget this or the webcam locks up
 cam.release()
 cv2.destroyAllWindows()
