@@ -5,59 +5,88 @@ import pandas as pd
 import datetime
 import os
 
-# File to store user data
-DATA_FILE = "authorized_users.csv"
+# Where we're going to keep track of people we know
+CSV_PATH = "authorized_users.csv"
 
-# Step 1: Create CSV file if it doesn't exist
-if not os.path.exists(DATA_FILE):
-    df = pd.DataFrame(columns=["Name", "Timestamp"] + [f"enc_{i}" for i in range(128)])
-    df.to_csv(DATA_FILE, index=False)
+# If the file isn't already there, we make it with headers for name, timestamp, and 128 facial encodings
+if not os.path.isfile(CSV_PATH):
+    # Added enc_0 to enc_127 just so it's easier to keep track of encoding values in CSV
+    columns = ["Name", "Timestamp"]
+    for i in range(128):
+        columns.append(f"enc_{i}")
+    starter_df = pd.DataFrame(columns=columns)
+    starter_df.to_csv(CSV_PATH, index=False)
+    print(f"[INFO] Created new data file at {CSV_PATH}")
 
-# Step 2: Capture webcam
-video = cv2.VideoCapture(0)
-print("[INFO] Press 'S' to scan and register face, or 'Q' to quit.")
+# Initialize webcam feed (default camera)
+cam = cv2.VideoCapture(0)
 
-user_registered = False
+print("[INFO] Press 'S' to scan & register a face. Hit 'Q' when you're done.")
+
+# A simple flag to check if we already registered someone in this run
+has_registered = False
 
 while True:
-    ret, frame = video.read()
-    display_frame = frame.copy()
+    grabbed, frame = cam.read()
+    
+    if not grabbed:
+        print("[ERROR] Couldn't grab frame from camera.")
+        continue
 
-    # Display instruction on the screen
-    cv2.putText(display_frame, "Press 'S' to Scan and Register | Press 'Q' to Quit",
-                (10, display_frame.shape[0] - 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    # Just duplicating for overlay stuff
+    screen = frame.copy()
 
-    if user_registered:
-        cv2.putText(display_frame, "User Registered Successfully!",
-                    (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
+    # Just reminding the user what to do
+    cv2.putText(screen, "Press 'S' to Scan and Register | Press 'Q' to Quit", 
+                (15, screen.shape[0] - 25),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
 
-    cv2.imshow("Register - Facial Recognition", display_frame)
+    if has_registered:
+        # This only shows up after a successful registration
+        cv2.putText(screen, "User Registered Successfully!", 
+                    (40, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 200, 0), 3)
+
+    # Show the video with text overlay
+    cv2.imshow("Register - Facial Recognition", screen)
+
+    # Grab key input
     key = cv2.waitKey(1)
 
-    if key == ord('s'):
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        face_locations = face_recognition.face_locations(rgb_frame)
-        face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+    if key == ord('s') or key == ord('S'):
+        # Convert color format since face_recognition works with RGB
+        rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        if len(face_encodings) == 0:
-            print("[WARNING] No face detected. Try again.")
+        # Try finding any face(s) in the current frame
+        faces = face_recognition.face_locations(rgb_image)
+        encodings = face_recognition.face_encodings(rgb_image, faces)
+
+        if not encodings:
+            print("[WARNING] Hmm... no face detected. Try holding still or adjusting lighting.")
             continue
 
-        encoding = face_encodings[0]
-        name = input("Enter the name of the user: ")
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        face_encoding = encodings[0]  # Just taking the first face for now
 
-        row = [name, timestamp] + list(encoding)
-        df = pd.read_csv(DATA_FILE)
-        df.loc[len(df)] = row
-        df.to_csv(DATA_FILE, index=False)
+        # Ask the user who this is
+        user_name = input("Enter the name of the user: ").strip()
 
-        print(f"[SUCCESS] User '{name}' registered successfully!")
-        user_registered = True
+        # Getting current time, just for logging purposes
+        time_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    elif key == ord('q'):
+        # Stitch everything together into a row
+        full_data = [user_name, time_now] + list(face_encoding)
+
+        # Read existing data and append
+        existing_df = pd.read_csv(CSV_PATH)
+        existing_df.loc[len(existing_df)] = full_data
+        existing_df.to_csv(CSV_PATH, index=False)
+
+        print(f"[SUCCESS] {user_name} has been added to the authorized list.")
+        has_registered = True
+
+    elif key == ord('q') or key == ord('Q'):
+        print("[INFO] Quitting the registration system.")
         break
 
-video.release()
+# Release the cam and close the OpenCV windows
+cam.release()
 cv2.destroyAllWindows()
